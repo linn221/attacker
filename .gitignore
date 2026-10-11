@@ -1,0 +1,4 @@
+attacker.db
+attacker.db-journal
+attacker.db-wal
+attacker.db-shm

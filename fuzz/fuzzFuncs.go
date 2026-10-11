@@ -1,5 +1,7 @@
 package fuzz
 
+import "strings"
+
 func ToggleHttps(base Shot) []Shot {
 	shots := make([]Shot, 2)
 	shots[0] = base.Clone()
@@ -10,10 +12,10 @@ func ToggleHttps(base Shot) []Shot {
 }
 
 func vary(values []string, apply func(s Shot, v string) Shot) FuzzFunc {
-	return func(s Shot) []Shot {
+	return func(base Shot) []Shot {
 		shots := make([]Shot, 0, len(values))
 		for _, v := range values {
-			shots = append(shots, apply(s, v))
+			shots = append(shots, apply(base.Clone(), v))
 		}
 		return shots
 	}
@@ -111,4 +113,59 @@ func ParameterPollutionQuery(name string, value string) FuzzFunc {
 func ReadWordlist(file string) []string {
 
 	panic("//implement")
+}
+
+func AppendExtension(s Shot) []Shot {
+	extensions := []string{
+		// PHP
+		".php",
+		".php3",
+		".php4",
+		".php5",
+		".php7",
+		".php8",
+		".phtml",
+
+		// ASP / ASP.NET
+		".asp",
+		".aspx",
+		".ashx",
+		".asmx",
+		".asax",
+		".axd",
+		".svc",
+
+		// JSP / Java web
+		".jsp",
+		".jspx",
+		".do",
+		".action",
+		".faces",
+
+		// ColdFusion
+		".cfm",
+		".cfml",
+
+		// CGI
+		".cgi",
+
+		// Perl CGI
+		".pl",
+
+		// Static web documents
+		".html",
+		".htm",
+		".xhtml",
+		".shtml",
+	}
+
+	return vary(extensions, func(s Shot, extension string) Shot {
+		if i := strings.IndexByte(s.Uri, '?'); i >= 0 {
+			s.Uri = s.Uri[:i] + extension + s.Uri[i:]
+		} else {
+			s.Uri += extension
+		}
+
+		return s
+	})(s)
 }

@@ -1,63 +1,30 @@
 package fuzz
 
 import (
-	"bytes"
-	"io"
+	"context"
 	"net/http"
-	"time"
 )
 
 type Client struct {
 	HTTPClient *http.Client
+	Context    context.Context
 }
 
-func (c *Client) Do(req Request) (Response, error) {
-	req.SetDefault()
-
-	httpReq, err := http.NewRequest(
-		req.Method,
-		req.URL,
-		bytes.NewReader(req.Body),
-	)
-	if err != nil {
-		return Response{}, err
+// Do sends req with the client's HTTP client.
+// A context on the client replaces the request context. An empty method becomes GET.
+func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if req.Method == "" {
+		req.Method = http.MethodGet
 	}
-
-	for name, values := range req.Headers {
-		for _, value := range values {
-			httpReq.Header.Add(name, value)
-		}
+	if req.Header == nil {
+		req.Header = make(http.Header)
 	}
-
-	then := time.Now()
-	httpResp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return Response{}, err
+	if c.Context != nil {
+		req = req.WithContext(c.Context)
 	}
-	defer httpResp.Body.Close()
-
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return Response{}, err
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
 	}
-	latency := time.Since(then)
-	ct := httpResp.Header.Get("Content-Type")
-	n := min(len(body), 500)
-	sum := string(body)[:n]
-
-	id, err := randomString(16)
-	if err != nil {
-		return Response{}, err
-	}
-	return Response{
-		Id:          id,
-		URL:         req.URL,
-		Latency:     uint(latency),
-		ContentType: ct,
-		StatusCode:  httpResp.StatusCode,
-		Headers:     httpResp.Header,
-		Body:        body,
-		Body500:     sum,
-		BodyHash:    md5Hash(string(body)),
-	}, nil
+	return httpClient.Do(req)
 }

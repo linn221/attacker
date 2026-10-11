@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/csv"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,56 +11,49 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linn221/attacker/fuzz"
+	"github.com/linn221/attacker/models"
 )
 
+// main opens the database and serves the jobs page, job controls, and results pages on port 6423.
 func main() {
+	if err := initDB(); err != nil {
+		log.Fatal(err)
+	}
+
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/newjob", func(w http.ResponseWriter, r *http.Request) {
-		job, err := jobFromRequest(r)
+		if dir, err := dirFromQuery(r); err == nil {
+			if existing, err := jobByName(dir); err == nil {
+				stopJobRun(existing.Id)
+			}
+		}
+		job, err := jobFromRequest(r, true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := writeJobHeaders(job.Dir); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if !startJob(job, 1) {
+			http.Error(w, "job is already running", http.StatusConflict)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		go runJob(job, 1)
 	})
-	mux.HandleFunc("/resumejob", func(w http.ResponseWriter, r *http.Request) {
-		job, err := jobFromRequest(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		go runJob(job, job.Current)
-	})
-	mux.HandleFunc("/results", func(w http.ResponseWriter, r *http.Request) {
-		dir, err := dirFromQuery(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		f, err := os.Open(filepath.Join(dir, "processed", "results.csv"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"results.csv\"")
-		if _, err := io.Copy(w, f); err != nil {
-			log.Printf("stream results: %v", err)
-		}
-	})
+	mux.HandleFunc("/resumejob", handleResumeJob)
+	mux.HandleFunc("/stopjob", handleStopJob)
+	mux.HandleFunc("/results", handleResults)
+	mux.HandleFunc("/results/table", handleResultsTable)
+	mux.HandleFunc("/results/detail", handleResultDetail)
+	mux.HandleFunc("/results/file", handleResultFile)
+	mux.HandleFunc("/results/status", handleResultStatus)
+	mux.HandleFunc("/results/hide", handleResultHide)
+	mux.HandleFunc("/results/pin", handleResultPin)
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		dir, err := dirFromQuery(r)
 		if err != nil {
@@ -80,17 +73,11 @@ func main() {
 
 type Job struct {
 	Dir     string
+	JobID   int
 	GapMin  int
 	GapMax  int
 	Current int
 	End     int
-	meta    jobMeta
-}
-
-type jobMeta struct {
-	Current int    `json:"current"`
-	End     int    `json:"end"`
-	Gap     string `json:"gap"`
 }
 
 type jobStatusBody struct {
@@ -99,78 +86,90 @@ type jobStatusBody struct {
 	Errors    int `json:"errors"`
 }
 
-func (j *Job) processTask(id int) (int, error) { // nextId, error
+// processTask runs task id, then moves the job forward.
+// A failed request is logged and still counts as finished. A cancelled ctx skips the pause and stops the loop.
+// It returns the next task id, or 0 when id is past the end or the job was stopped.
+// It returns an error only when the new current task cannot be saved.
+func (j *Job) processTask(ctx context.Context, id int) (int, error) {
 	if id > j.End {
 		return 0, nil
 	}
-
-	if err := j.executeTask(id); err != nil {
-		if werr := j.appendError(id, err); werr != nil {
-			return 0, werr
-		}
+	if ctx.Err() != nil {
+		return 0, nil
 	}
-	return j.finishTask(id)
+
+	if err := j.executeTask(ctx, id); err != nil {
+		log.Printf("task %d: %v", id, err)
+	}
+	return j.finishTask(ctx, id)
 }
 
-func (j *Job) executeTask(id int) error {
+// executeTask sends the shot stored in id.json and saves the response.
+// The body and headers are written under processed/, named by id, and a result row is inserted.
+// It returns an error if the shot cannot be read or the response cannot be stored.
+func (j *Job) executeTask(ctx context.Context, id int) error {
 	src := filepath.Join(j.Dir, fmt.Sprintf("%d.json", id))
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("read %d.json: %w", id, err)
 	}
 
-	var shot fuzz.Shot
+	var shot models.Shot
 	if err := json.Unmarshal(data, &shot); err != nil {
 		return fmt.Errorf("unmarshal %d.json: %w", id, err)
 	}
 
-	req := shot.ToRequest()
-	req.SetDefault()
+	req, err := shot.ToRequest()
+	if err != nil {
+		return fmt.Errorf("request %d: %w", id, err)
+	}
 	fmt.Printf("%s %s\n", req.Method, req.URL)
 
-	client := &fuzz.Client{HTTPClient: &http.Client{}}
+	client := &fuzz.Client{HTTPClient: &http.Client{}, Context: ctx}
+	then := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request %d: %w", id, err)
 	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("request %d: %w", id, err)
+	}
+	latency := time.Since(then)
 
+	taskID := strconv.Itoa(id)
 	processed := filepath.Join(j.Dir, "processed")
 	if err := os.MkdirAll(processed, 0700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(processed, resp.Id), resp.Body, 0600); err != nil {
+	responseFile := filepath.Join(processed, taskID)
+	responseHeaders := filepath.Join(processed, taskID+".headers")
+	if err := os.WriteFile(responseFile, body, 0600); err != nil {
 		return err
 	}
 	var headerBuf bytes.Buffer
-	if err := resp.Headers.Write(&headerBuf); err != nil {
+	if err := resp.Header.Write(&headerBuf); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(processed, resp.Id+".headers"), headerBuf.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(responseHeaders, headerBuf.Bytes(), 0600); err != nil {
 		return err
 	}
 	if err := os.Rename(src, filepath.Join(processed, fmt.Sprintf("%d.json", id))); err != nil {
 		return err
 	}
-
-	results, err := os.OpenFile(filepath.Join(processed, "results.csv"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	_, writeErr := fmt.Fprintln(results, resp.String())
-	closeErr := results.Close()
-	if writeErr != nil {
-		return writeErr
-	}
-	return closeErr
+	return insertResult(j.JobID, id, shot, req, resp, body, latency, responseFile, responseHeaders)
 }
 
-func (j *Job) finishTask(id int) (int, error) {
+// finishTask saves id+1 as the next task, then waits for a random pause inside the job's gap.
+// A cancelled ctx saves that next id and returns 0 without waiting. It returns 0 when id is the last task.
+// It returns an error if current cannot be saved.
+func (j *Job) finishTask(ctx context.Context, id int) (int, error) {
 	j.Current = id + 1
-	j.meta.Current = j.Current
-	if err := writeMeta(j.Dir, j.meta); err != nil {
+	if err := updateJobCurrent(j.JobID, j.Current); err != nil {
 		return 0, err
 	}
-	if id >= j.End {
+	if id >= j.End || ctx.Err() != nil {
 		return 0, nil
 	}
 	span := j.GapMax - j.GapMin
@@ -178,83 +177,210 @@ func (j *Job) finishTask(id int) (int, error) {
 	if span > 0 {
 		secs += rand.Intn(span + 1)
 	}
-	time.Sleep(time.Duration(secs) * time.Second)
-	return id + 1, nil
-}
-
-func (j *Job) appendError(id int, taskErr error) error {
-	processed := filepath.Join(j.Dir, "processed")
-	if err := os.MkdirAll(processed, 0700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(filepath.Join(processed, "errors.csv"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := csv.NewWriter(f)
-	if err := w.Write([]string{strconv.Itoa(id), taskErr.Error()}); err != nil {
-		return err
-	}
-	w.Flush()
-	return w.Error()
-}
-
-func NewJob(dir string) *Job {
-	if _, err := os.ReadDir(dir); err != nil {
-		log.Printf("read job dir: %v", err)
-		return nil
-	}
-	meta, err := readMeta(dir)
-	if err != nil {
-		log.Printf("read meta.json: %v", err)
-		return nil
-	}
-	gapMin, gapMax, err := parseGap(meta.Gap)
-	if err != nil {
-		log.Printf("read gap: %v", err)
-		return nil
-	}
-	if meta.Current < 1 {
-		meta.Current = 1
-	}
-	return &Job{
-		Dir:     dir,
-		GapMin:  gapMin,
-		GapMax:  gapMax,
-		Current: meta.Current,
-		End:     meta.End,
-		meta:    meta,
+	timer := time.NewTimer(time.Duration(secs) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return 0, nil
+	case <-timer.C:
+		return id + 1, nil
 	}
 }
 
-func runJob(job *Job, id int) {
-	defer printStatusCounts(job.Dir)
+type jobRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+var (
+	jobsMu      sync.Mutex
+	jobsRunning = map[int]*jobRun{}
+)
+
+// beginJob records id as running and returns the context Stop cancels.
+// It returns false when that job is already running.
+func beginJob(id int) (context.Context, bool) {
+	jobsMu.Lock()
+	defer jobsMu.Unlock()
+	if _, ok := jobsRunning[id]; ok {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	jobsRunning[id] = &jobRun{cancel: cancel, done: make(chan struct{})}
+	return ctx, true
+}
+
+// endJob forgets id and closes its done channel.
+// It does nothing when id is not the active run.
+func endJob(id int) {
+	jobsMu.Lock()
+	run := jobsRunning[id]
+	delete(jobsRunning, id)
+	jobsMu.Unlock()
+	if run != nil {
+		close(run.done)
+	}
+}
+
+// jobIsRunning reports whether id has an active runner.
+func jobIsRunning(id int) bool {
+	jobsMu.Lock()
+	_, ok := jobsRunning[id]
+	jobsMu.Unlock()
+	return ok
+}
+
+// stopJobRun cancels the runner for id and waits until that runner has exited.
+// It returns immediately when id is not running. The wait includes a request already in flight, which is cancelled with the runner.
+func stopJobRun(id int) {
+	jobsMu.Lock()
+	run := jobsRunning[id]
+	jobsMu.Unlock()
+	if run == nil {
+		return
+	}
+	run.cancel()
+	<-run.done
+}
+
+// startJob runs tasks from id through job.End in the background.
+// An id below 1 starts at task 1. It returns false when the job is already running or id is past the end.
+func startJob(job *Job, id int) bool {
 	if id < 1 {
 		id = 1
 	}
-	for id > 0 {
-		next, err := job.processTask(id)
-		if err != nil {
-			log.Printf("task %d: %v", id, err)
-			return
-		}
-		id = next
+	if id > job.End {
+		return false
 	}
+	ctx, ok := beginJob(job.JobID)
+	if !ok {
+		return false
+	}
+	if err := updateJobStatus(job.JobID, jobStatusProcessing); err != nil {
+		endJob(job.JobID)
+		log.Printf("job %d: %v", job.JobID, err)
+		return false
+	}
+	go func() {
+		defer func() {
+			status := jobStatusStopped
+			if job.Current > job.End {
+				status = jobStatusCompleted
+			}
+			if err := updateJobStatus(job.JobID, status); err != nil {
+				log.Printf("job %d: %v", job.JobID, err)
+			}
+			endJob(job.JobID)
+		}()
+		for id > 0 {
+			if ctx.Err() != nil {
+				return
+			}
+			next, err := job.processTask(ctx, id)
+			if err != nil {
+				log.Printf("task %d: %v", id, err)
+				return
+			}
+			id = next
+		}
+	}()
+	return true
 }
 
-func jobFromRequest(r *http.Request) (*Job, error) {
+// handleResumeJob starts the job named by dir at its saved task.
+// A finished job is rejected. A job that is already running is left as it is.
+// It writes an empty 200 body and asks the status card to refresh.
+func handleResumeJob(w http.ResponseWriter, r *http.Request) {
+	job, err := jobFromRequest(r, false)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if job.Current > job.End {
+		http.Error(w, "job is complete", http.StatusConflict)
+		return
+	}
+	startJob(job, job.Current)
+	w.Header().Set("HX-Trigger", "job-status")
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleStopJob cancels the runner for the job named by dir.
+// Stopping a job that is not running still returns 200. It asks the status card to refresh.
+func handleStopJob(w http.ResponseWriter, r *http.Request) {
+	dir, err := dirFromQuery(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	job, err := jobByName(dir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stopJobRun(job.Id)
+	w.Header().Set("HX-Trigger", "job-status")
+	w.WriteHeader(http.StatusOK)
+}
+
+// jobFromRequest builds the runner for the dir query parameter.
+// When create is true, end and gap are read from the query and the job is inserted or reset. Otherwise the existing job is loaded.
+// It returns that runner, or an error when the directory or the job is invalid.
+func jobFromRequest(r *http.Request, create bool) (*Job, error) {
 	dir, err := dirFromQuery(r)
 	if err != nil {
 		return nil, err
 	}
-	job := NewJob(dir)
-	if job == nil {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("invalid job directory")
 	}
-	return job, nil
+	var model JobModel
+	if create {
+		end, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("end")))
+		if err != nil || end < 1 {
+			return nil, fmt.Errorf("end is required")
+		}
+		gap := strings.TrimSpace(r.URL.Query().Get("gap"))
+		if _, _, err := parseGap(gap); err != nil {
+			return nil, err
+		}
+		model, err = createJob(dir, gap, end)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		model, err = jobByName(dir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return jobFromModel(dir, model)
 }
 
+// jobFromModel turns a stored job into the runner used for a directory.
+// dir is that job's directory. It returns an error when model.Gap is not min:max.
+func jobFromModel(dir string, model JobModel) (*Job, error) {
+	gapMin, gapMax, err := parseGap(model.Gap)
+	if err != nil {
+		return nil, err
+	}
+	current := model.Current
+	if current < 1 {
+		current = 1
+	}
+	return &Job{
+		Dir:     dir,
+		JobID:   model.Id,
+		GapMin:  gapMin,
+		GapMax:  gapMax,
+		Current: current,
+		End:     model.End,
+	}, nil
+}
+
+// dirFromQuery reads the dir query parameter.
+// It returns an error when dir is missing.
 func dirFromQuery(r *http.Request) (string, error) {
 	dir := strings.TrimSpace(r.URL.Query().Get("dir"))
 	if dir == "" {
@@ -263,164 +389,38 @@ func dirFromQuery(r *http.Request) (string, error) {
 	return dir, nil
 }
 
-func writeJobHeaders(dir string) error {
-	processed := filepath.Join(dir, "processed")
-	if err := os.MkdirAll(processed, 0700); err != nil {
-		return err
-	}
-	if err := writeCSVHeader(filepath.Join(processed, "results.csv"), []string{"id", "url", "status_code", "body_hash", "content_type", "body_500"}); err != nil {
-		return err
-	}
-	return writeCSVHeader(filepath.Join(processed, "errors.csv"), []string{"id", "error"})
-}
-
-func writeCSVHeader(path string, header []string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	w := csv.NewWriter(f)
-	if err := w.Write(header); err != nil {
-		return err
-	}
-	w.Flush()
-	return w.Error()
-}
-
+// jobStatus reports progress for the job whose name is dir.
+// Processed is the number of stored results. Errors are finished tasks with no result. Left is the tasks not started yet.
+// It returns that summary, or an error when the job cannot be loaded.
 func jobStatus(dir string) (jobStatusBody, error) {
-	if _, err := os.ReadDir(dir); err != nil {
-		return jobStatusBody{}, fmt.Errorf("invalid job directory")
-	}
-	meta, err := readMeta(dir)
-	if err != nil {
-		return jobStatusBody{}, fmt.Errorf("read meta.json: %w", err)
-	}
-	processed, err := countCSVDataRows(filepath.Join(dir, "processed", "results.csv"))
+	job, err := jobByName(dir)
 	if err != nil {
 		return jobStatusBody{}, err
 	}
-	errs, err := countCSVDataRows(filepath.Join(dir, "processed", "errors.csv"))
+	processed, err := countResults(job.Id)
 	if err != nil {
 		return jobStatusBody{}, err
 	}
-	left := meta.End - processed - errs
+	done := job.Current - 1
+	if done < 0 {
+		done = 0
+	}
+	if done > job.End {
+		done = job.End
+	}
+	errs := done - processed
+	if errs < 0 {
+		errs = 0
+	}
+	left := job.End - done
 	if left < 0 {
 		left = 0
 	}
 	return jobStatusBody{Processed: processed, Left: left, Errors: errs}, nil
 }
 
-func printStatusCounts(dir string) {
-	f, err := os.Open(filepath.Join(dir, "processed", "results.csv"))
-	if err != nil {
-		log.Printf("results.csv: %v", err)
-		return
-	}
-	defer f.Close()
-
-	r := csv.NewReader(f)
-	header, err := r.Read()
-	if err != nil {
-		log.Printf("results.csv: %v", err)
-		return
-	}
-	col := -1
-	for i, name := range header {
-		if name == "status_code" {
-			col = i
-			break
-		}
-	}
-	if col < 0 {
-		log.Printf("results.csv: status_code column missing")
-		return
-	}
-
-	counts := map[string]int{}
-	for {
-		row, err := r.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			log.Printf("results.csv: %v", err)
-			return
-		}
-		if col >= len(row) || row[col] == "" {
-			continue
-		}
-		counts[row[col]]++
-	}
-
-	codes := make([]string, 0, len(counts))
-	for code := range counts {
-		codes = append(codes, code)
-	}
-	sort.Slice(codes, func(i, j int) bool {
-		ai, erri := strconv.Atoi(codes[i])
-		aj, errj := strconv.Atoi(codes[j])
-		if erri != nil || errj != nil {
-			return codes[i] < codes[j]
-		}
-		return ai < aj
-	})
-	for _, code := range codes {
-		fmt.Printf("%s %d\n", code, counts[code])
-	}
-}
-
-func countCSVDataRows(path string) (int, error) {
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	r := csv.NewReader(f)
-	n := 0
-	for {
-		if _, err := r.Read(); err == io.EOF {
-			break
-		} else if err != nil {
-			return 0, err
-		}
-		n++
-	}
-	if n == 0 {
-		return 0, nil
-	}
-	return n - 1, nil
-}
-
-func readMeta(dir string) (jobMeta, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
-	if err != nil {
-		return jobMeta{}, err
-	}
-	var meta jobMeta
-	if err := json.Unmarshal(b, &meta); err != nil {
-		return jobMeta{}, err
-	}
-	return meta, nil
-}
-
-func writeMeta(dir string, meta jobMeta) error {
-	b, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	path := filepath.Join(dir, "meta.json")
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
+// parseGap splits a min:max pause into its two second counts.
+// It returns an error unless both numbers exist and 0 <= min <= max.
 func parseGap(gap string) (int, int, error) {
 	parts := strings.Split(strings.TrimSpace(gap), ":")
 	if len(parts) != 2 {

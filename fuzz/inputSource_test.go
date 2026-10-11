@@ -1,8 +1,6 @@
 package fuzz
 
 import (
-	"encoding/json"
-	"net/url"
 	"reflect"
 	"testing"
 )
@@ -13,7 +11,7 @@ func TestFuzzInputSourceQuery(t *testing.T) {
 		DomainName: "example.com",
 		Uri:        "/search",
 		Method:     "GET",
-		Headers:    map[string]string{"Accept": "text/html"},
+		Headers:    map[string][]string{"Accept": {"text/html"}},
 		Queries:    map[string][]string{"q": {"coffee", "tea"}, "page": {"1"}},
 	}
 
@@ -23,7 +21,7 @@ func TestFuzzInputSourceQuery(t *testing.T) {
 	}
 
 	q := shots[0]
-	if q.Method != "GET" || q.Body != "" || len(q.Headers) != 1 || q.Headers["Accept"] != "text/html" {
+	if q.Method != "GET" || q.BodyRaw != "" || q.BodyJson != nil || len(q.BodyForm) != 0 || len(q.Headers) != 1 || !reflect.DeepEqual(q.Headers["Accept"], []string{"text/html"}) {
 		t.Fatalf("query shot %#v", q)
 	}
 	if !reflect.DeepEqual(q.Queries, base.Queries) {
@@ -34,30 +32,22 @@ func TestFuzzInputSourceQuery(t *testing.T) {
 	if form.Method != "POST" || form.Queries != nil {
 		t.Fatalf("form shot method %s queries %#v", form.Method, form.Queries)
 	}
-	if form.Headers["Content-Type"] != "application/x-www-form-urlencoded" || form.Headers["Accept"] != "text/html" {
+	if !reflect.DeepEqual(form.Headers["Content-Type"], []string{"application/x-www-form-urlencoded"}) || !reflect.DeepEqual(form.Headers["Accept"], []string{"text/html"}) {
 		t.Fatalf("form headers %#v", form.Headers)
 	}
-	gotForm, err := url.ParseQuery(form.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(map[string][]string(gotForm), base.Queries) {
-		t.Fatalf("form body %#v", gotForm)
+	if !reflect.DeepEqual(form.BodyForm, base.Queries) {
+		t.Fatalf("form body %#v", form.BodyForm)
 	}
 
 	js := shots[2]
-	if js.Method != "POST" || js.Queries != nil || js.Headers["Content-Type"] != "application/json" {
+	if js.Method != "POST" || js.Queries != nil || !reflect.DeepEqual(js.Headers["Content-Type"], []string{"application/json"}) {
 		t.Fatalf("json shot %#v", js)
 	}
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(js.Body), &obj); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(obj, map[string]any{"q": []any{"coffee", "tea"}, "page": "1"}) {
-		t.Fatalf("json body %#v", obj)
+	if !reflect.DeepEqual(js.BodyJson, map[string]any{"q": []string{"coffee", "tea"}, "page": "1"}) {
+		t.Fatalf("json body %#v", js.BodyJson)
 	}
 
-	if !reflect.DeepEqual(base.Queries, map[string][]string{"q": {"coffee", "tea"}, "page": {"1"}}) || base.Body != "" {
+	if !reflect.DeepEqual(base.Queries, map[string][]string{"q": {"coffee", "tea"}, "page": {"1"}}) || base.BodyRaw != "" {
 		t.Fatalf("base mutated %#v", base)
 	}
 }
@@ -65,8 +55,8 @@ func TestFuzzInputSourceQuery(t *testing.T) {
 func TestFuzzInputSourceJSON(t *testing.T) {
 	base := Shot{
 		Method:  "PUT",
-		Headers: map[string]string{"Content-type": "application/json"},
-		Body:    `{"name":"ada","n":1,"ok":false,"tags":[1552,261],"child":{"x":"y"}}`,
+		Headers: map[string][]string{"Content-type": {"application/json"}},
+		BodyRaw: `{"name":"ada","n":1,"ok":false,"tags":[1552,261],"child":{"x":"y"}}`,
 	}
 
 	shots := FuzzInputSource(base)
@@ -74,7 +64,7 @@ func TestFuzzInputSourceJSON(t *testing.T) {
 		t.Fatalf("shots %d", len(shots))
 	}
 
-	if shots[0].Method != "PUT" || shots[0].Body != "" || headerValue(shots[0].Headers, "Content-Type") != "" {
+	if shots[0].Method != "PUT" || shots[0].BodyRaw != "" || shotHeader(shots[0].Headers, "Content-Type") != "" {
 		t.Fatalf("query shot %#v", shots[0])
 	}
 	if !reflect.DeepEqual(shots[0].Queries, map[string][]string{
@@ -87,37 +77,29 @@ func TestFuzzInputSourceJSON(t *testing.T) {
 		t.Fatalf("query values %#v", shots[0].Queries)
 	}
 
-	if shots[1].Method != "POST" || shots[1].Headers["Content-Type"] != "application/x-www-form-urlencoded" {
+	if shots[1].Method != "POST" || !reflect.DeepEqual(shots[1].Headers["Content-Type"], []string{"application/x-www-form-urlencoded"}) {
 		t.Fatalf("form shot %#v", shots[1])
 	}
 	if _, ok := shots[1].Headers["Content-type"]; ok {
 		t.Fatalf("duplicate content type %#v", shots[1].Headers)
 	}
-	gotForm, err := url.ParseQuery(shots[1].Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(map[string][]string(gotForm), shots[0].Queries) {
-		t.Fatalf("form body %#v", gotForm)
+	if !reflect.DeepEqual(shots[1].BodyForm, shots[0].Queries) {
+		t.Fatalf("form body %#v", shots[1].BodyForm)
 	}
 
-	if shots[2].Method != "POST" || shots[2].Headers["Content-Type"] != "application/json" {
+	if shots[2].Method != "POST" || !reflect.DeepEqual(shots[2].Headers["Content-Type"], []string{"application/json"}) {
 		t.Fatalf("json shot %#v", shots[2])
 	}
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(shots[2].Body), &obj); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(obj, map[string]any{
+	if !reflect.DeepEqual(shots[2].BodyJson, map[string]any{
 		"name":  "ada",
-		"n":     float64(1),
+		"n":     1,
 		"ok":    false,
-		"tags":  []any{float64(1552), float64(261)},
+		"tags":  []any{1552, 261},
 		"child": map[string]any{"x": "y"},
 	}) {
-		t.Fatalf("json body %s", shots[2].Body)
+		t.Fatalf("json body %#v", shots[2].BodyJson)
 	}
-	if base.Body == "" || base.Headers["Content-type"] != "application/json" {
+	if base.BodyRaw == "" || !reflect.DeepEqual(base.Headers["Content-type"], []string{"application/json"}) {
 		t.Fatalf("base mutated %#v", base)
 	}
 }
@@ -125,33 +107,29 @@ func TestFuzzInputSourceJSON(t *testing.T) {
 func TestFuzzInputSourceForm(t *testing.T) {
 	base := Shot{
 		Method:  "POST",
-		Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
-		Body:    "name=a+b&id=1&id=2",
+		Headers: map[string][]string{"Content-Type": {"application/x-www-form-urlencoded"}},
+		BodyRaw: "name=a+b&id=1&id=2",
 	}
 
 	shots := FuzzInputSource(base)
-	if shots[0].Method != "POST" || shots[0].Body != "" {
+	if shots[0].Method != "POST" || shots[0].BodyRaw != "" {
 		t.Fatalf("query shot %#v", shots[0])
 	}
 	if !reflect.DeepEqual(shots[0].Queries, map[string][]string{"name": {"a b"}, "id": {"1", "2"}}) {
 		t.Fatalf("query values %#v", shots[0].Queries)
 	}
 
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(shots[2].Body), &obj); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(obj, map[string]any{"name": "a b", "id": []any{"1", "2"}}) {
-		t.Fatalf("json body %#v", obj)
+	if !reflect.DeepEqual(shots[2].BodyJson, map[string]any{"name": "a b", "id": []string{"1", "2"}}) {
+		t.Fatalf("json body %#v", shots[2].BodyJson)
 	}
 }
 
 func TestFuzzInputSourceBodyOverridesQuery(t *testing.T) {
 	base := Shot{
 		Method:  "POST",
-		Headers: map[string]string{"Content-Type": "application/json"},
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
 		Queries: map[string][]string{"id": {"1"}, "page": {"2"}},
-		Body:    `{"id":9,"name":"ada"}`,
+		BodyRaw: `{"id":9,"name":"ada"}`,
 	}
 
 	shots := FuzzInputSource(base)
@@ -164,13 +142,13 @@ func TestFuzzInputSourceBodyOverridesQuery(t *testing.T) {
 }
 
 func TestFuzzInputSourceUnchanged(t *testing.T) {
-	plain := Shot{Method: "POST", Body: "hello", Headers: map[string]string{"Content-Type": "text/plain"}}
-	if got := FuzzInputSource(plain); len(got) != 1 || got[0].Body != "hello" {
+	plain := Shot{Method: "POST", BodyRaw: "hello", Headers: map[string][]string{"Content-Type": {"text/plain"}}}
+	if got := FuzzInputSource(plain); len(got) != 1 || got[0].BodyRaw != "hello" {
 		t.Fatalf("opaque %#v", got)
 	}
 
-	array := Shot{Method: "POST", Headers: map[string]string{"Content-Type": "application/json"}, Body: `[1,2]`}
-	if got := FuzzInputSource(array); len(got) != 1 || got[0].Body != `[1,2]` {
+	array := Shot{Method: "POST", Headers: map[string][]string{"Content-Type": {"application/json"}}, BodyRaw: `[1,2]`}
+	if got := FuzzInputSource(array); len(got) != 1 || got[0].BodyRaw != `[1,2]` {
 		t.Fatalf("array %#v", got)
 	}
 

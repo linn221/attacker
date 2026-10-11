@@ -48,7 +48,7 @@ func (fz *Fuzz) DomainName(domain string) *Fuzz {
 }
 
 func (fz *Fuzz) Body(body string) *Fuzz {
-	fz.shot().Body = body
+	fz.shot().BodyRaw = body
 	return fz
 }
 
@@ -69,13 +69,9 @@ func (fz *Fuzz) Cookie(key, value string) *Fuzz {
 func (fz *Fuzz) Header(key, value string) *Fuzz {
 	shot := fz.shot()
 	if shot.Headers == nil {
-		shot.Headers = make(map[string]string)
+		shot.Headers = make(map[string][]string)
 	}
-	if cur := shot.Headers[key]; cur != "" {
-		shot.Headers[key] = cur + ", " + value
-	} else {
-		shot.Headers[key] = value
-	}
+	shot.Headers[key] = append(shot.Headers[key], value)
 	return fz
 }
 

@@ -40,7 +40,7 @@ func AppendCookies(name string, values ...string) FuzzFunc {
 func AddHeader(name string, values ...string) FuzzFunc {
 	return vary(values, func(s Shot, v string) Shot {
 		s.Headers = cloneHeaders(s.Headers)
-		s.Headers[name] = v
+		s.Headers[name] = []string{v}
 		return s
 	})
 }
@@ -48,11 +48,7 @@ func AddHeader(name string, values ...string) FuzzFunc {
 func AppendHeader(name string, values ...string) FuzzFunc {
 	return vary(values, func(s Shot, v string) Shot {
 		s.Headers = cloneHeaders(s.Headers)
-		if cur := s.Headers[name]; cur != "" {
-			s.Headers[name] = cur + ", " + v
-		} else {
-			s.Headers[name] = v
-		}
+		s.Headers[name] = append(s.Headers[name], v)
 		return s
 	})
 }
@@ -94,7 +90,7 @@ func Subdomains(values ...string) FuzzFunc {
 	})
 }
 
-func Uri(values ...string) FuzzFunc {
+func Uris(values ...string) FuzzFunc {
 	return vary(values, func(s Shot, v string) Shot {
 		s.Uri = v
 		return s

@@ -14,6 +14,7 @@ import (
 
 	"github.com/linn221/attacker/finding"
 	"github.com/linn221/attacker/models"
+	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -23,18 +24,24 @@ var errJobNotFound = errors.New("job not found")
 
 const databaseFile = "attacker.db"
 
+var (
+	mysqlUser     = "root"
+	mysqlPassword = ""
+	mysqlHost     = "127.0.0.1"
+	mysqlPort     = "3306"
+	mysqlDatabase = "attacker"
+)
+
 var db *gorm.DB
 
-// initDB opens attacker.db, creates the job and result tables, and keeps the connection for later calls.
-// It returns an error if the file cannot be opened or the tables cannot be created.
-func initDB() error {
-	opened, err := gorm.Open(sqlite.Open(databaseFile), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
+// initDB opens the database with open, creates the job and result tables, and keeps the connection for later calls.
+// It returns an error if the database cannot be opened or the tables cannot be created.
+func initDB(open func() (*gorm.DB, error)) error {
+	opened, err := open()
 	if err != nil {
-		return fmt.Errorf("open sqlite: %w", err)
+		return err
 	}
-	if err := opened.AutoMigrate(&JobModel{}, &models.Result{}); err != nil {
+	if err := opened.AutoMigrate(&models.Job{}, &models.Result{}); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	db = opened
@@ -47,70 +54,98 @@ func initDB() error {
 	return nil
 }
 
+// openSQLite connects to the attacker.db file.
+// It returns the database, or an error if the file cannot be opened.
+func openSQLite() (*gorm.DB, error) {
+	opened, err := gorm.Open(sqlite.Open(databaseFile), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	return opened, nil
+}
+
+// openMySQL connects with the package-level mysqlUser, mysqlPassword, mysqlHost, mysqlPort, and mysqlDatabase values.
+// It returns the database, or an error if the server cannot be reached.
+func openMySQL() (*gorm.DB, error) {
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4&loc=Local",
+		mysqlUser, mysqlPassword, mysqlHost, mysqlPort, mysqlDatabase)
+	opened, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open mysql: %w", err)
+	}
+	return opened, nil
+}
+
 // settleJobStatuses records jobs that are not running as stopped, and finished jobs as completed.
 // A process restart has no live runner, so a stored processing state becomes stopped. It returns an error if the update fails.
 func settleJobStatuses() error {
-	if err := db.Exec("UPDATE job_models SET current_status = ? WHERE current_status IS NULL OR current_status = '' OR current_status = ?", jobStatusStopped, jobStatusProcessing).Error; err != nil {
+	if err := db.Exec("UPDATE jobs SET current_status = ? WHERE current_status IS NULL OR current_status = '' OR current_status = ?", jobStatusStopped, jobStatusProcessing).Error; err != nil {
 		return fmt.Errorf("settle job status: %w", err)
 	}
-	if err := db.Exec(`UPDATE job_models SET current_status = ? WHERE current > "end"`, jobStatusCompleted).Error; err != nil {
+	if err := db.Exec("UPDATE jobs SET current_status = ? WHERE current > "+quoteIdent("end"), jobStatusCompleted).Error; err != nil {
 		return fmt.Errorf("settle completed jobs: %w", err)
 	}
 	return nil
 }
 
 // createJob inserts a job, or resets it when name already exists.
-// name is the job directory. gap is the min:max pause between tasks, in seconds. end is the last task id.
-// On reset, current goes back to 1 and end and gap are replaced. It returns the saved job.
-func createJob(name, gap string, end int) (JobModel, error) {
+// name is the job directory. title is the label shown with that directory. gap is the min:max pause between tasks, in seconds. end is the last task id.
+// On reset, current goes back to 1 and end, gap, and title are replaced. It returns the saved job.
+func createJob(name, title, gap string, end int) (models.Job, error) {
 	existing, err := jobByName(name)
 	if err == nil {
 		if err := db.Model(&existing).Updates(map[string]any{
 			"current":        1,
 			"end":            end,
 			"gap":            gap,
+			"title":          title,
 			"current_status": jobStatusStopped,
 		}).Error; err != nil {
-			return JobModel{}, err
+			return models.Job{}, err
 		}
 		existing.Current = 1
 		existing.End = end
 		existing.Gap = gap
+		existing.Title = title
 		existing.CurrentStatus = jobStatusStopped
 		return existing, nil
 	}
 	if !errors.Is(err, errJobNotFound) {
-		return JobModel{}, err
+		return models.Job{}, err
 	}
-	job := JobModel{Name: name, Current: 1, End: end, Gap: gap, CurrentStatus: jobStatusStopped}
+	job := models.Job{Name: name, Title: title, Current: 1, End: end, Gap: gap, CurrentStatus: jobStatusStopped}
 	if err := db.Create(&job).Error; err != nil {
-		return JobModel{}, err
+		return models.Job{}, err
 	}
 	return job, nil
 }
 
 // listJobs returns every stored job, newest first.
-func listJobs() ([]JobModel, error) {
-	var jobs []JobModel
+func listJobs() ([]models.Job, error) {
+	var jobs []models.Job
 	if err := db.Order("id desc").Find(&jobs).Error; err != nil {
 		return nil, err
 	}
 	if jobs == nil {
-		jobs = []JobModel{}
+		jobs = []models.Job{}
 	}
 	return jobs, nil
 }
 
 // jobByName loads the job whose name is the job directory.
 // It returns errJobNotFound when no row has that name.
-func jobByName(name string) (JobModel, error) {
-	var job JobModel
-	tx := db.Raw("SELECT * FROM job_models WHERE name = ? LIMIT 1", name).Scan(&job)
+func jobByName(name string) (models.Job, error) {
+	var job models.Job
+	tx := db.Raw("SELECT * FROM jobs WHERE name = ? LIMIT 1", name).Scan(&job)
 	if tx.Error != nil {
-		return JobModel{}, tx.Error
+		return models.Job{}, tx.Error
 	}
 	if job.Id == 0 {
-		return JobModel{}, fmt.Errorf("%w: %s", errJobNotFound, name)
+		return models.Job{}, fmt.Errorf("%w: %s", errJobNotFound, name)
 	}
 	return job, nil
 }
@@ -118,14 +153,14 @@ func jobByName(name string) (JobModel, error) {
 // updateJobCurrent sets which task the job will run next.
 // id is the job primary key. current is that next task id. It returns an error if the update fails.
 func updateJobCurrent(id, current int) error {
-	job := JobModel{Id: id}
+	job := models.Job{Id: id}
 	return db.Model(&job).Updates(map[string]any{"current": current}).Error
 }
 
 // updateJobStatus stores the job's current_status.
 // status is stopped, processing, or completed. It returns an error if the update fails.
 func updateJobStatus(id int, status string) error {
-	job := JobModel{Id: id}
+	job := models.Job{Id: id}
 	return db.Model(&job).Update("current_status", status).Error
 }
 
@@ -141,9 +176,13 @@ func setResultPinned(id int, pinned bool) error {
 // responseFile and responseHeaders are saved as absolute paths. Maps are stored as JSON strings.
 // It returns an error if encoding or the insert fails.
 func insertResult(jobID, taskID int, shot models.Shot, req *http.Request, resp *http.Response, body []byte, latency time.Duration, responseFile, responseHeaders string) error {
-	headers, err := encodeStringMap(shot.Headers)
+	headers, err := encodeValuesMap(shot.Headers)
 	if err != nil {
 		return fmt.Errorf("encode headers: %w", err)
+	}
+	bodyText, err := shot.BodyText()
+	if err != nil {
+		return fmt.Errorf("encode body: %w", err)
 	}
 	cookies, err := encodeValuesMap(shot.Cookies)
 	if err != nil {
@@ -162,7 +201,9 @@ func insertResult(jobID, taskID int, shot models.Shot, req *http.Request, resp *
 		return fmt.Errorf("response headers: %w", err)
 	}
 	n := min(len(body), 500)
-	sum := md5.Sum(body)
+	hash := md5.New()
+	fmt.Fprintf(hash, "%d\n", resp.StatusCode)
+	hash.Write(body)
 	row := models.Result{
 		JobId:           jobID,
 		Index:           taskID,
@@ -172,12 +213,14 @@ func insertResult(jobID, taskID int, shot models.Shot, req *http.Request, resp *
 		Url:             req.URL.String(),
 		Method:          req.Method,
 		Headers:         headers,
+		HeadersRaw:      shot.HeadersRaw,
 		Cookies:         cookies,
 		Queries:         queries,
-		Body:            shot.Body,
+		QueriesRaw:      shot.QueriesRaw,
+		Body:            bodyText,
 		StatusCode:      resp.StatusCode,
 		Body500:         string(body[:n]),
-		BodyHash:        fmt.Sprintf("%x", sum),
+		ResponseHash:    fmt.Sprintf("%x", hash.Sum(nil)),
 		ContentType:     resp.Header.Get("Content-Type"),
 		ContentLength:   len(body),
 		Latency:         int(latency),
@@ -213,11 +256,19 @@ func resultViewByID(id int) (ResultView, error) {
 }
 
 // queryResults loads the result rows for one job using the /results filters.
-// search matches the URL, body hash, and Body500, ignoring case. exclude drops those body hashes.
+// search matches the URL, response hash, and Body500, ignoring case. exclude drops those response hashes.
 // status limits the returned rows: 200, 300, 400, and 500 mean that whole class, and any other number must match exactly. The summary counts ignore status.
+// A non-empty raw replaces that WHERE clause and is executed unchanged. page.where is the clause that was used.
 // sorts order the unpinned rows. Pinned rows that match the same filters stay first, in id order. An empty sorts list orders unpinned rows by id. It returns the matching rows and those counts.
-func queryResults(jobID int, search, status string, exclude []string, sorts []resultSort) (resultPage, error) {
-	where, args := resultWhere(jobID, search, exclude, "")
+func queryResults(jobID int, search, status, raw string, exclude []string, sorts []resultSort) (resultPage, error) {
+	countWhere, countArgs := resultWhere(jobID, search, exclude, "")
+	rowWhere, rowArgs := resultWhere(jobID, search, exclude, status)
+	page := resultPage{where: inlineSQL(rowWhere, rowArgs)}
+	if raw != "" {
+		countWhere, countArgs = raw, nil
+		rowWhere, rowArgs = raw, nil
+		page.where = raw
+	}
 	var counts struct {
 		Total int
 		C200  int
@@ -230,26 +281,53 @@ func queryResults(jobID int, search, status string, exclude []string, sorts []re
 		COALESCE(SUM(CASE WHEN status_code >= 300 AND status_code < 400 THEN 1 ELSE 0 END), 0) AS c300,
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0) AS c400,
 		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS c500
-		FROM results WHERE ` + where
-	if err := db.Raw(countSQL, args...).Scan(&counts).Error; err != nil {
-		return resultPage{}, err
+		FROM results WHERE ` + countWhere
+	if err := db.Raw(countSQL, countArgs...).Scan(&counts).Error; err != nil {
+		return page, err
 	}
-	rowWhere, rowArgs := resultWhere(jobID, search, exclude, status)
 	var rows []models.Result
 	if err := db.Raw("SELECT * FROM results WHERE "+rowWhere+" ORDER BY "+orderBy(sorts), rowArgs...).Scan(&rows).Error; err != nil {
-		return resultPage{}, err
+		return page, err
 	}
 	if rows == nil {
 		rows = []models.Result{}
 	}
-	return resultPage{
-		rows: rows,
-		all:  counts.Total,
-		c200: counts.C200,
-		c300: counts.C300,
-		c400: counts.C400,
-		c500: counts.C500,
-	}, nil
+	page.rows = rows
+	page.all = counts.Total
+	page.c200 = counts.C200
+	page.c300 = counts.C300
+	page.c400 = counts.C400
+	page.c500 = counts.C500
+	return page, nil
+}
+
+// inlineSQL substitutes args for ? placeholders so the clause can be edited and sent back as raw SQL.
+// Strings are quoted. It returns that clause.
+func inlineSQL(clause string, args []any) string {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(clause); i++ {
+		if clause[i] == '?' && n < len(args) {
+			b.WriteString(sqlLiteral(args[n]))
+			n++
+			continue
+		}
+		b.WriteByte(clause[i])
+	}
+	return b.String()
+}
+
+func sqlLiteral(v any) string {
+	switch x := v.(type) {
+	case int:
+		return strconv.Itoa(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case string:
+		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
+	default:
+		return fmt.Sprint(x)
+	}
 }
 
 // resultWhere builds the SQL predicate for a result query.
@@ -261,7 +339,7 @@ func resultWhere(jobID int, search string, exclude []string, status string) (str
 	search = strings.TrimSpace(search)
 	if search != "" {
 		pattern := "%" + escapeLike(search) + "%"
-		clauses = append(clauses, "(LOWER(url) LIKE ? ESCAPE '\\' OR LOWER(body_hash) LIKE ? ESCAPE '\\' OR LOWER(body500) LIKE ? ESCAPE '\\')")
+		clauses = append(clauses, "(LOWER(url) LIKE ? ESCAPE '\\' OR LOWER(response_hash) LIKE ? ESCAPE '\\' OR LOWER(body500) LIKE ? ESCAPE '\\')")
 		args = append(args, pattern, pattern, pattern)
 	}
 	hashes := make([]string, 0, len(exclude))
@@ -276,7 +354,7 @@ func resultWhere(jobID int, search string, exclude []string, status string) (str
 			marks[i] = "?"
 			args = append(args, hash)
 		}
-		clauses = append(clauses, "body_hash NOT IN ("+strings.Join(marks, ",")+")")
+		clauses = append(clauses, "response_hash NOT IN ("+strings.Join(marks, ",")+")")
 	}
 	clauses, args = appendStatusClause(clauses, args, status)
 	return strings.Join(clauses, " AND "), args
@@ -338,7 +416,7 @@ func sortOptions() []sortOption {
 		{Field: "index", Column: "index", Label: "#"},
 		{Field: "url", Column: "url", Label: "Url"},
 		{Field: "status_code", Column: "status_code", Label: "StatusCode"},
-		{Field: "hash", Column: "body_hash", Label: "Hash"},
+		{Field: "hash", Column: "response_hash", Label: "Hash"},
 		{Field: "latency", Column: "latency", Label: "Latency"},
 		{Field: "content_length", Column: "content_length", Label: "ContentLength"},
 		{Field: "body", Column: "body500", Label: "Body"},
@@ -412,15 +490,27 @@ func orderBy(sorts []resultSort) string {
 		if s.Desc {
 			dir = "DESC"
 		}
-		parts = append(parts, `"`+s.Column+`" `+dir)
+		parts = append(parts, quoteIdent(s.Column)+" "+dir)
 		if s.Column == "id" {
 			seenID = true
 		}
 	}
 	if !seenID {
-		parts = append(parts, `"id" ASC`)
+		parts = append(parts, quoteIdent("id")+" ASC")
 	}
-	return `COALESCE("is_pin", 0) DESC, CASE WHEN COALESCE("is_pin", 0) = 1 THEN "id" END ASC, ` + strings.Join(parts, ", ")
+	pin := quoteIdent("is_pin")
+	id := quoteIdent("id")
+	return `COALESCE(` + pin + `, 0) DESC, CASE WHEN COALESCE(` + pin + `, 0) = 1 THEN ` + id + ` END ASC, ` + strings.Join(parts, ", ")
+}
+
+// quoteIdent quotes name for the open database.
+// MySQL uses backticks. SQLite uses double quotes.
+func quoteIdent(name string) string {
+	mark := `"`
+	if db != nil && db.Dialector.Name() == "mysql" {
+		mark = "`"
+	}
+	return mark + strings.ReplaceAll(name, mark, mark+mark) + mark
 }
 
 // averageLatency returns the mean result latency for jobID, in nanoseconds.
@@ -443,7 +533,7 @@ func countResults(jobID int) (int, error) {
 // decodeResult copies row into a ResultView and unmarshals Headers, Cookies, and Queries.
 // It returns an error if any of those JSON columns is invalid.
 func decodeResult(row models.Result) (ResultView, error) {
-	headers, err := decodeStringMap(row.Headers)
+	headers, err := decodeValuesMap(row.Headers)
 	if err != nil {
 		return ResultView{}, fmt.Errorf("result %d headers: %w", row.Id, err)
 	}
@@ -465,30 +555,19 @@ func decodeResult(row models.Result) (ResultView, error) {
 		Url:             row.Url,
 		Method:          row.Method,
 		Headers:         headers,
+		HeadersRaw:      row.HeadersRaw,
 		Cookies:         cookies,
 		Queries:         queries,
+		QueriesRaw:      row.QueriesRaw,
 		Body:            row.Body,
 		StatusCode:      row.StatusCode,
 		Body500:         row.Body500,
-		BodyHash:        row.BodyHash,
+		ResponseHash:    row.ResponseHash,
 		Latency:         row.Latency,
 		ResponseFile:    row.ResponseFile,
 		ResposneHeaders: row.ResposneHeaders,
 		IsPin:           row.IsPin,
 	}, nil
-}
-
-// encodeStringMap turns a map[string]string into the JSON string stored on a result.
-// A nil map becomes {}. It returns that JSON.
-func encodeStringMap(m map[string]string) (string, error) {
-	if m == nil {
-		m = map[string]string{}
-	}
-	b, err := json.Marshal(m)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
 }
 
 // encodeValuesMap turns a map[string][]string into the JSON string stored on a result.
@@ -502,22 +581,6 @@ func encodeValuesMap(m map[string][]string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
-}
-
-// decodeStringMap restores a map[string]string from a result's JSON column.
-// Empty or null JSON returns an empty map. It returns an error if s is not that JSON shape.
-func decodeStringMap(s string) (map[string]string, error) {
-	if s == "" || s == "null" {
-		return map[string]string{}, nil
-	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
-		return nil, err
-	}
-	if m == nil {
-		m = map[string]string{}
-	}
-	return m, nil
 }
 
 // decodeValuesMap restores a map[string][]string from a result's JSON column.

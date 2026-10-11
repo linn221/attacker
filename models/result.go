@@ -1,5 +1,6 @@
 package models
 
+// will be stored in db for querying
 type Result struct {
 	Id         int `gorm:"primaryKey"`
 	JobId      int `gorm:"index"`
@@ -9,14 +10,16 @@ type Result struct {
 	Uri        string
 	Url        string
 	Method     string
-	Headers    string `gorm:"type:text"` // JSON map[string]string
+	Headers    string `gorm:"type:text"` // JSON map[string][]string
+	HeadersRaw string `gorm:"type:text"`
 	Cookies    string `gorm:"type:text"` // JSON map[string][]string
 	Queries    string `gorm:"type:text"` // JSON map[string][]string
+	QueriesRaw string `gorm:"type:text"`
 	Body       string `gorm:"type:text"`
 
 	StatusCode      int
 	Body500         string `gorm:"type:text"`
-	BodyHash        string
+	ResponseHash    string
 	ContentType     string
 	ContentLength   int
 	Latency         int

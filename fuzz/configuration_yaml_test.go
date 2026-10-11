@@ -111,10 +111,10 @@ func TestLoadConfigurationFile(t *testing.T) {
 		t.Fatalf("shots %d", len(shots))
 	}
 	shot := shots[0]
-	if !shot.Https || shot.DomainName != domain || shot.Uri != uri || shot.Method != method || shot.Body != body {
+	if !shot.Https || shot.DomainName != domain || shot.Uri != uri || shot.Method != method || shot.BodyRaw != body {
 		t.Fatalf("shot %#v", shot)
 	}
-	if shot.Headers["Accept"] != "text/html" || len(shot.Cookies["session"]) != 1 || shot.Cookies["session"][0] != "abc" {
+	if !reflect.DeepEqual(shot.Headers["Accept"], []string{"text/html"}) || len(shot.Cookies["session"]) != 1 || shot.Cookies["session"][0] != "abc" {
 		t.Fatalf("shot maps %#v %#v", shot.Headers, shot.Cookies)
 	}
 	if !reflect.DeepEqual(shot.Queries["q"], []string{"coffee", "tea"}) {

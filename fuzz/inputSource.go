@@ -3,7 +3,6 @@ package fuzz
 import (
 	"bytes"
 	"encoding/json"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -35,12 +34,14 @@ func FuzzInputSource(s Shot) []Shot {
 }
 
 func shotInputFields(s Shot) (map[string]inputField, bool) {
-	body := strings.TrimSpace(s.Body)
-	ct := headerValue(s.Headers, "Content-Type")
+	ct := shotHeader(s.Headers, "Content-Type")
 
 	var bodyFields map[string]inputField
-	recognized := body == ""
-	if body != "" {
+	recognized := true
+	switch {
+	case strings.TrimSpace(s.BodyRaw) != "":
+		body := strings.TrimSpace(s.BodyRaw)
+		recognized = false
 		if obj, ok := jsonObjectBody(body, ct); ok {
 			recognized = true
 			bodyFields = fieldsFromJSONObject(obj)
@@ -48,6 +49,18 @@ func shotInputFields(s Shot) (map[string]inputField, bool) {
 			recognized = true
 			bodyFields = fieldsFromValues(form)
 		}
+	case s.BodyJson != nil:
+		raw, err := json.Marshal(s.BodyJson)
+		if err != nil {
+			return nil, false
+		}
+		obj, ok := jsonObjectBody(string(raw), "application/json")
+		if !ok {
+			return nil, false
+		}
+		bodyFields = fieldsFromJSONObject(obj)
+	case len(s.BodyForm) > 0:
+		bodyFields = fieldsFromValues(s.BodyForm)
 	}
 	if !recognized {
 		return nil, false
@@ -152,7 +165,9 @@ func jsonScalarString(v any) (string, bool) {
 func shotAsQuery(s Shot, fields map[string]inputField) Shot {
 	t := s.Clone()
 	t.Queries = fieldValues(fields)
-	t.Body = ""
+	t.BodyRaw = ""
+	t.BodyJson = nil
+	t.BodyForm = nil
 	removeHeader(t.Headers, "Content-Type")
 	return t
 }
@@ -161,7 +176,9 @@ func shotAsForm(s Shot, fields map[string]inputField) Shot {
 	t := s.Clone()
 	t.Method = "POST"
 	t.Queries = nil
-	t.Body = encodeFormFields(fields)
+	t.BodyRaw = ""
+	t.BodyJson = nil
+	t.BodyForm = fieldValues(fields)
 	t.Headers = replaceHeader(t.Headers, "Content-Type", "application/x-www-form-urlencoded")
 	return t
 }
@@ -170,7 +187,9 @@ func shotAsJSON(s Shot, fields map[string]inputField) Shot {
 	t := s.Clone()
 	t.Method = "POST"
 	t.Queries = nil
-	t.Body = encodeJSONFields(fields)
+	t.BodyRaw = ""
+	t.BodyForm = nil
+	t.BodyJson = jsonObject(fields)
 	t.Headers = replaceHeader(t.Headers, "Content-Type", "application/json")
 	return t
 }
@@ -186,17 +205,7 @@ func fieldValues(fields map[string]inputField) map[string][]string {
 	return out
 }
 
-func encodeFormFields(fields map[string]inputField) string {
-	v := make(url.Values, len(fields))
-	for k, f := range fields {
-		for _, value := range f.values {
-			v.Add(k, value)
-		}
-	}
-	return v.Encode()
-}
-
-func encodeJSONFields(fields map[string]inputField) string {
+func jsonObject(fields map[string]inputField) map[string]any {
 	obj := make(map[string]any, len(fields))
 	for k, f := range fields {
 		switch {
@@ -208,11 +217,7 @@ func encodeJSONFields(fields map[string]inputField) string {
 			obj[k] = append([]string(nil), f.values...)
 		}
 	}
-	encoded, err := marshalJSON(obj)
-	if err != nil {
-		return ""
-	}
-	return encoded
+	return obj
 }
 
 func marshalJSON(v any) (string, error) {
@@ -225,19 +230,28 @@ func marshalJSON(v any) (string, error) {
 	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
-func replaceHeader(h map[string]string, name, value string) map[string]string {
+func replaceHeader(h map[string][]string, name, value string) map[string][]string {
 	if h == nil {
-		h = make(map[string]string)
+		h = make(map[string][]string)
 	}
 	removeHeader(h, name)
-	h[name] = value
+	h[name] = []string{value}
 	return h
 }
 
-func removeHeader(h map[string]string, name string) {
+func removeHeader(h map[string][]string, name string) {
 	for k := range h {
 		if strings.EqualFold(k, name) {
 			delete(h, k)
 		}
 	}
+}
+
+func shotHeader(h map[string][]string, name string) string {
+	for key, values := range h {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
 }

@@ -16,3 +16,4 @@
 - [ ] show response body, response headers, etc be autoloaded via htmx hx-trigger of load based on the presence of url queries such as showResponseHeaders=true, showResponseBody=true, etc.
 - [ ] add mutate body function that will take the type as type parameter, mutating the parsed body, and then plugging back any type
 - [ ] response headers should be studied, like which requests have which header
+- [ ] want a detector for CORS related, Clickjacking bugs, any bugs that could be detected by the absence or misconfiguration of http headers

@@ -8,10 +8,6 @@ func cloneValues(m map[string][]string) map[string][]string {
 	return out
 }
 
-func cloneHeaders(m map[string]string) map[string]string {
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
+func cloneHeaders(m map[string][]string) map[string][]string {
+	return cloneValues(m)
 }

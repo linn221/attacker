@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/linn221/attacker/models"
 )
 
 // handleIndex writes the page that lists every job.
@@ -53,8 +55,12 @@ func loadIndexJobs() ([]indexJob, error) {
 		left, errs := jobProgress(job, processed)
 		q := url.Values{}
 		q.Set("dir", job.Name)
+		title := strings.TrimSpace(job.Title)
+		if title == "" {
+			title = jobTitle(job.Name)
+		}
 		out = append(out, indexJob{
-			Title:     jobTitle(job.Name),
+			Title:     title,
 			Path:      job.Name,
 			Status:    displayJobStatus(job.CurrentStatus, left),
 			Processed: processed,
@@ -89,7 +95,7 @@ func jobGapText(gap string) string {
 
 // jobProgress counts tasks not started yet and finished tasks that stored no result.
 // processed is the number of result rows. It returns left and errors.
-func jobProgress(job JobModel, processed int) (int, int) {
+func jobProgress(job models.Job, processed int) (int, int) {
 	done := job.Current - 1
 	if done < 0 {
 		done = 0
@@ -140,9 +146,7 @@ func renderIndexJob(job indexJob) string {
 	b.WriteString(`<div class="d-flex flex-wrap justify-content-between gap-2 align-items-start">`)
 	b.WriteString(`<div class="me-auto">`)
 	b.WriteString(`<div class="fw-semibold text-break">` + html.EscapeString(job.Title) + `</div>`)
-	if job.Path != job.Title {
-		b.WriteString(`<div class="small text-secondary text-break">` + html.EscapeString(job.Path) + `</div>`)
-	}
+	b.WriteString(`<div class="small text-secondary text-break">` + html.EscapeString(job.Path) + `</div>`)
 	b.WriteString(`</div>`)
 	b.WriteString(jobStateBadge(job.Status))
 	b.WriteString(`</div>`)

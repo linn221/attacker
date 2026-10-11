@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,29 +23,13 @@ import (
 
 // main opens the database and serves the jobs page, job controls, and results pages on port 6423.
 func main() {
-	if err := initDB(); err != nil {
+	if err := initDB(openSQLite); err != nil {
 		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/newjob", func(w http.ResponseWriter, r *http.Request) {
-		if dir, err := dirFromQuery(r); err == nil {
-			if existing, err := jobByName(dir); err == nil {
-				stopJobRun(existing.Id)
-			}
-		}
-		job, err := jobFromRequest(r, true)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if !startJob(job, 1) {
-			http.Error(w, "job is already running", http.StatusConflict)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.HandleFunc("/newjob", handleNewJob)
 	mux.HandleFunc("/resumejob", handleResumeJob)
 	mux.HandleFunc("/stopjob", handleStopJob)
 	mux.HandleFunc("/results", handleResults)
@@ -119,15 +104,12 @@ func (j *Job) executeTask(ctx context.Context, id int) error {
 		return fmt.Errorf("unmarshal %d.json: %w", id, err)
 	}
 
-	req, err := shot.ToRequest()
-	if err != nil {
-		return fmt.Errorf("request %d: %w", id, err)
-	}
-	fmt.Printf("%s %s\n", req.Method, req.URL)
-
 	client := &fuzz.Client{HTTPClient: &http.Client{}, Context: ctx}
 	then := time.Now()
-	resp, err := client.Do(req)
+	resp, req, err := client.Send(shot)
+	if req != nil {
+		fmt.Printf("%s %s\n", req.Method, req.URL)
+	}
 	if err != nil {
 		return fmt.Errorf("request %d: %w", id, err)
 	}
@@ -287,6 +269,27 @@ func startJob(job *Job, id int) bool {
 	return true
 }
 
+// handleNewJob stores the job from the query and starts it at the first task.
+// dir, title, end, and gap come from the query. The response body is the results page URL.
+func handleNewJob(w http.ResponseWriter, r *http.Request) {
+	if dir, err := dirFromQuery(r); err == nil {
+		if existing, err := jobByName(dir); err == nil {
+			stopJobRun(existing.Id)
+		}
+	}
+	job, err := jobFromRequest(r, true)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !startJob(job, 1) {
+		http.Error(w, "job is already running", http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	io.WriteString(w, jobResultsURL(r, job.Dir))
+}
+
 // handleResumeJob starts the job named by dir at its saved task.
 // A finished job is rejected. A job that is already running is left as it is.
 // It writes an empty 200 body and asks the status card to refresh.
@@ -324,7 +327,7 @@ func handleStopJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // jobFromRequest builds the runner for the dir query parameter.
-// When create is true, end and gap are read from the query and the job is inserted or reset. Otherwise the existing job is loaded.
+// When create is true, title, end, and gap are read from the query and the job is inserted or reset. Otherwise the existing job is loaded.
 // It returns that runner, or an error when the directory or the job is invalid.
 func jobFromRequest(r *http.Request, create bool) (*Job, error) {
 	dir, err := dirFromQuery(r)
@@ -335,7 +338,7 @@ func jobFromRequest(r *http.Request, create bool) (*Job, error) {
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("invalid job directory")
 	}
-	var model JobModel
+	var model models.Job
 	if create {
 		end, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("end")))
 		if err != nil || end < 1 {
@@ -345,7 +348,11 @@ func jobFromRequest(r *http.Request, create bool) (*Job, error) {
 		if _, _, err := parseGap(gap); err != nil {
 			return nil, err
 		}
-		model, err = createJob(dir, gap, end)
+		title := strings.TrimSpace(r.URL.Query().Get("title"))
+		if title == "" {
+			return nil, fmt.Errorf("title is required")
+		}
+		model, err = createJob(dir, title, gap, end)
 		if err != nil {
 			return nil, err
 		}
@@ -360,7 +367,7 @@ func jobFromRequest(r *http.Request, create bool) (*Job, error) {
 
 // jobFromModel turns a stored job into the runner used for a directory.
 // dir is that job's directory. It returns an error when model.Gap is not min:max.
-func jobFromModel(dir string, model JobModel) (*Job, error) {
+func jobFromModel(dir string, model models.Job) (*Job, error) {
 	gapMin, gapMax, err := parseGap(model.Gap)
 	if err != nil {
 		return nil, err
@@ -377,6 +384,18 @@ func jobFromModel(dir string, model JobModel) (*Job, error) {
 		Current: current,
 		End:     model.End,
 	}, nil
+}
+
+// jobResultsURL builds the results page URL for dir on the host that called r.
+// It returns that absolute URL.
+func jobResultsURL(r *http.Request, dir string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	q := url.Values{}
+	q.Set("dir", dir)
+	return scheme + "://" + r.Host + "/results?" + q.Encode()
 }
 
 // dirFromQuery reads the dir query parameter.

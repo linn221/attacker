@@ -2,6 +2,7 @@ package models
 
 import "maps"
 
+// valid http request to be used as a base
 type Configuration struct {
 	Https      *bool               `yaml:"https,omitempty"`
 	DomainName *string             `yaml:"domainName,omitempty"`
@@ -40,9 +41,11 @@ func (cfg *Configuration) Shot(base Shot) Shot {
 
 	if cfg.Headers != nil {
 		if result.Headers == nil {
-			result.Headers = make(map[string]string, len(cfg.Headers))
+			result.Headers = make(map[string][]string, len(cfg.Headers))
 		}
-		maps.Copy(result.Headers, cfg.Headers)
+		for name, value := range cfg.Headers {
+			result.Headers[name] = []string{value}
+		}
 	}
 
 	if cfg.Queries != nil {
@@ -62,7 +65,13 @@ func (cfg *Configuration) Shot(base Shot) Shot {
 	}
 
 	if cfg.Body != nil {
-		result.Body = *cfg.Body
+		result.BodyRaw = *cfg.Body
+	}
+	if cfg.BodyJson != nil {
+		result.BodyJson = cfg.BodyJson
+	}
+	if cfg.BodyForm != nil {
+		result.BodyForm = cloneValues(cfg.BodyForm)
 	}
 
 	return result

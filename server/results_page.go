@@ -50,10 +50,11 @@ func loadResultPage(r *http.Request) (resultPage, int, error) {
 	if err != nil {
 		return resultPage{}, http.StatusNotFound, err
 	}
-	page, err := queryResults(job.Id, strings.TrimSpace(r.URL.Query().Get("search")), strings.TrimSpace(r.URL.Query().Get("status_code")), r.URL.Query()["exclude_hash"], parseSorts(r.URL.Query()))
+	page, err := queryResults(job.Id, strings.TrimSpace(r.URL.Query().Get("search")), strings.TrimSpace(r.URL.Query().Get("status_code")), r.URL.Query().Get("raw"), r.URL.Query()["exclude_hash"], parseSorts(r.URL.Query()))
 	if err != nil {
-		return resultPage{}, http.StatusInternalServerError, err
+		page.queryError = err.Error()
 	}
+	page.title = job.Title
 	return page, http.StatusOK, nil
 }
 
@@ -186,12 +187,15 @@ func handleResultPin(w http.ResponseWriter, r *http.Request) {
 }
 
 type resultPage struct {
-	rows []models.Result
-	all  int
-	c200 int
-	c300 int
-	c400 int
-	c500 int
+	rows       []models.Result
+	all        int
+	c200       int
+	c300       int
+	c400       int
+	c500       int
+	where      string
+	queryError string
+	title      string
 }
 
 // renderResultsPage builds the full results document from page and the filters on r.
@@ -202,7 +206,11 @@ func renderResultsPage(r *http.Request, page resultPage) string {
 	var body strings.Builder
 	body.WriteString(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">`)
 	body.WriteString(`<meta name="viewport" content="width=device-width, initial-scale=1">`)
-	body.WriteString(`<title>Results</title>`)
+	heading := strings.TrimSpace(page.title)
+	if heading == "" {
+		heading = "Results"
+	}
+	body.WriteString(`<title>` + html.EscapeString(heading) + `</title>`)
 	body.WriteString(`<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">`)
 	body.WriteString(`<script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.4/dist/htmx.min.js"></script>`)
 	body.WriteString(`<style>`)
@@ -214,12 +222,16 @@ func renderResultsPage(r *http.Request, page resultPage) string {
 	body.WriteString(`</style></head><body class="bg-light">`)
 	body.WriteString(`<div class="container-fluid py-4" style="max-width:1400px">`)
 	body.WriteString(`<div class="d-flex flex-wrap align-items-baseline gap-3 mb-1">`)
-	body.WriteString(`<h1 class="h4 mb-0">Results</h1>`)
+	body.WriteString(`<h1 class="h4 mb-0">` + html.EscapeString(heading) + `</h1>`)
 	body.WriteString(`<a href="/">All jobs</a>`)
 	body.WriteString(`</div>`)
 	body.WriteString(`<p class="text-secondary small text-break mb-3">` + html.EscapeString(q.Get("dir")) + `</p>`)
 	body.WriteString(renderJobStatus(q.Get("dir")))
 	body.WriteString(renderFilters(q))
+	body.WriteString(renderRawQuery(q, page.where))
+	if page.queryError != "" {
+		body.WriteString(`<div class="alert alert-warning">` + html.EscapeString(page.queryError) + `</div>`)
+	}
 	body.WriteString(renderSortForm(q))
 	body.WriteString(renderExcluded(q))
 	body.WriteString(renderResultsTable(q, page))
@@ -251,7 +263,29 @@ func renderFilters(q url.Values) string {
 		`<button class="btn btn-primary" type="submit">Apply</button>` +
 		`<a class="btn btn-outline-secondary" href="` + html.EscapeString(resetFiltersURL(q.Get("dir"))) + `">Reset filters</a>` +
 		refreshButton(q) +
+		`<button type="button" class="btn btn-outline-secondary" onclick="document.getElementById('raw-query').classList.remove('d-none')">Raw</button>` +
 		`</div></form>`
+}
+
+// renderRawQuery builds the form whose raw parameter replaces the results WHERE clause.
+// where is the clause currently used to list rows, so the box starts from the active filters.
+// The form stays hidden until Raw is clicked, unless raw is already in q. It returns that HTML.
+func renderRawQuery(q url.Values, where string) string {
+	class := "mt-2 d-none"
+	if q.Get("raw") != "" {
+		class = "mt-2"
+	}
+	var b strings.Builder
+	b.WriteString(`<form id="raw-query" method="get" action="/results" class="` + class + ` mb-3">`)
+	b.WriteString(hiddenValue("dir", q.Get("dir")))
+	for _, s := range parseSorts(q) {
+		b.WriteString(hiddenValue("sort", s.token()))
+	}
+	b.WriteString(`<label class="form-label mb-1" for="raw">Raw query</label>`)
+	b.WriteString(`<input class="form-control font-monospace" id="raw" name="raw" value="` + html.EscapeString(where) + `">`)
+	b.WriteString(`<button class="btn btn-primary mt-2" type="submit">Apply raw</button>`)
+	b.WriteString(`</form>`)
+	return b.String()
 }
 
 // renderResultsTable builds the summary links and the result rows for q.
@@ -310,6 +344,7 @@ func renderSortForm(q url.Values) string {
 	b.WriteString(hiddenValue("dir", q.Get("dir")))
 	b.WriteString(hiddenValue("search", q.Get("search")))
 	b.WriteString(hiddenValue("status_code", q.Get("status_code")))
+	b.WriteString(hiddenValue("raw", q.Get("raw")))
 	for _, hash := range q["exclude_hash"] {
 		if hash == "" {
 			continue
@@ -460,7 +495,7 @@ func statusStat(label, value, valueClass string) string {
 // remainingText estimates how long the requests still left for job will take.
 // The estimate is the midpoint of the gap for each pause, plus the average latency for each request still left.
 // It returns the short remaining label and the inputs used for that estimate.
-func remainingText(job JobModel, status jobStatusBody) (string, string) {
+func remainingText(job models.Job, status jobStatusBody) (string, string) {
 	gapMin, gapMax, err := parseGap(job.Gap)
 	if err != nil {
 		return "unavailable", ""
@@ -578,7 +613,7 @@ func renderResultRow(q url.Values, row models.Result) string {
 		detailButton("RequestHeaders", detailURL(dir, row.Id, "request_headers"), detailID) +
 		detailButton("ResponseHeaders", detailURL(dir, row.Id, "response_headers"), detailID) +
 		detailButton("ResponseBody", detailURL(dir, row.Id, "response_body"), detailID) +
-		`<a class="btn btn-sm btn-outline-danger" href="` + html.EscapeString(excludeHashURL(q, row.BodyHash)) + `">Exclude hash</a>` +
+		`<a class="btn btn-sm btn-outline-danger" href="` + html.EscapeString(excludeHashURL(q, row.ResponseHash)) + `">Exclude hash</a>` +
 		pinButton(dir, row)
 	rowClass := ""
 	if row.IsPin {
@@ -588,7 +623,7 @@ func renderResultRow(q url.Values, row models.Result) string {
 		`<td>` + strconv.Itoa(row.Index) + `</td>` +
 		`<td class="text-break">` + html.EscapeString(row.Url) + `</td>` +
 		`<td>` + statusBadge(row.StatusCode) + `</td>` +
-		`<td class="text-break"><code class="small">` + html.EscapeString(row.BodyHash) + `</code></td>` +
+		`<td class="text-break"><code class="small">` + html.EscapeString(row.ResponseHash) + `</code></td>` +
 		`<td class="text-nowrap">` + html.EscapeString(formatLatency(row.Latency)) + `</td>` +
 		`<td class="text-nowrap">` + strconv.Itoa(row.ContentLength) + `</td>` +
 		`<td class="body500"><div class="small text-break">` + html.EscapeString(row.Body500) + `</div></td>` +
@@ -699,10 +734,16 @@ func detailContent(row ResultView, part string) (string, string, bool) {
 	case "full_url":
 		return "FullUrl", formatFullURL(row), false
 	case "queries":
+		if row.QueriesRaw != "" {
+			return "Queries", row.QueriesRaw, false
+		}
 		return "Queries", formatQueries(row.Queries), false
 	case "request_body":
 		return "RequestBody", row.Body, false
 	case "request_headers":
+		if row.HeadersRaw != "" {
+			return "RequestHeaders", row.HeadersRaw, false
+		}
 		return "RequestHeaders", formatStringMap(row.Headers), false
 	case "response_headers":
 		text, err := readStoredFile(row.ResposneHeaders)
@@ -790,8 +831,8 @@ func formatQueries(m map[string][]string) string {
 }
 
 // formatStringMap renders headers as "Name: value" lines, sorted by name.
-// It returns an empty string when m has no entries.
-func formatStringMap(m map[string]string) string {
+// Each value of a header is its own line. It returns an empty string when m has no entries.
+func formatStringMap(m map[string][]string) string {
 	if len(m) == 0 {
 		return ""
 	}
@@ -801,13 +842,24 @@ func formatStringMap(m map[string]string) string {
 	}
 	sort.Strings(keys)
 	var b strings.Builder
-	for i, key := range keys {
-		if i > 0 {
-			b.WriteByte('\n')
+	for _, key := range keys {
+		values := m[key]
+		if len(values) == 0 {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(key)
+			b.WriteString(":")
+			continue
 		}
-		b.WriteString(key)
-		b.WriteString(": ")
-		b.WriteString(m[key])
+		for _, value := range values {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(key)
+			b.WriteString(": ")
+			b.WriteString(value)
+		}
 	}
 	return b.String()
 }

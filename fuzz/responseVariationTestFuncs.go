@@ -28,10 +28,10 @@ func TryAccepts(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Accept"] = v
+		s.Headers["Accept"] = []string{v}
 		return s
 	})(s)
 }
@@ -79,10 +79,10 @@ func TryUserAgent(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["User-Agent"] = v
+		s.Headers["User-Agent"] = []string{v}
 		return s
 	})(s)
 }
@@ -121,10 +121,10 @@ func TryReferer(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Referer"] = v
+		s.Headers["Referer"] = []string{v}
 		return s
 	})(s)
 }
@@ -149,10 +149,10 @@ func TryAcceptLanguage(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Accept-Language"] = v
+		s.Headers["Accept-Language"] = []string{v}
 		return s
 	})(s)
 }
@@ -170,10 +170,10 @@ func TryAcceptEncoding(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Accept-Encoding"] = v
+		s.Headers["Accept-Encoding"] = []string{v}
 		return s
 	})(s)
 }
@@ -206,10 +206,10 @@ func HostHeaderInjection(s Shot) []Shot {
 
 	return vary(hosts, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Host"] = v
+		s.Headers["Host"] = []string{v}
 
 		return s
 	})(s)
@@ -238,10 +238,10 @@ func TryOrigin(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Origin"] = v
+		s.Headers["Origin"] = []string{v}
 
 		return s
 	})(s)
@@ -276,10 +276,10 @@ func TryContentType(s Shot) []Shot {
 
 	return vary(values, func(s Shot, v string) Shot {
 		if s.Headers == nil {
-			s.Headers = make(map[string]string)
+			s.Headers = make(map[string][]string)
 		}
 
-		s.Headers["Content-Type"] = v
+		s.Headers["Content-Type"] = []string{v}
 
 		return s
 	})(s)
@@ -291,11 +291,11 @@ func TryAjax(s Shot) []Shot {
 	// XMLHttpRequest / jQuery
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+1)
+		shot.Headers = make(map[string][]string, len(s.Headers)+1)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["X-Requested-With"] = "XMLHttpRequest"
+		shot.Headers["X-Requested-With"] = []string{"XMLHttpRequest"}
 
 		shots = append(shots, shot)
 	}
@@ -303,12 +303,12 @@ func TryAjax(s Shot) []Shot {
 	// Fetch API
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+2)
+		shot.Headers = make(map[string][]string, len(s.Headers)+2)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["Sec-Fetch-Mode"] = "cors"
-		shot.Headers["Sec-Fetch-Dest"] = "empty"
+		shot.Headers["Sec-Fetch-Mode"] = []string{"cors"}
+		shot.Headers["Sec-Fetch-Dest"] = []string{"empty"}
 
 		shots = append(shots, shot)
 	}
@@ -316,13 +316,13 @@ func TryAjax(s Shot) []Shot {
 	// Fetch API with JSON expectation
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+3)
+		shot.Headers = make(map[string][]string, len(s.Headers)+3)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["Sec-Fetch-Mode"] = "cors"
-		shot.Headers["Sec-Fetch-Dest"] = "empty"
-		shot.Headers["Accept"] = "application/json"
+		shot.Headers["Sec-Fetch-Mode"] = []string{"cors"}
+		shot.Headers["Sec-Fetch-Dest"] = []string{"empty"}
+		shot.Headers["Accept"] = []string{"application/json"}
 
 		shots = append(shots, shot)
 	}
@@ -330,12 +330,12 @@ func TryAjax(s Shot) []Shot {
 	// Flutter / Dart HTTP client
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+2)
+		shot.Headers = make(map[string][]string, len(s.Headers)+2)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["User-Agent"] = "Dart/3.0 (dart:io)"
-		shot.Headers["Accept"] = "application/json"
+		shot.Headers["User-Agent"] = []string{"Dart/3.0 (dart:io)"}
+		shot.Headers["Accept"] = []string{"application/json"}
 
 		shots = append(shots, shot)
 	}
@@ -343,13 +343,13 @@ func TryAjax(s Shot) []Shot {
 	// Flutter application request
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+3)
+		shot.Headers = make(map[string][]string, len(s.Headers)+3)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["User-Agent"] = "Dart/3.0 (dart:io)"
-		shot.Headers["Accept"] = "application/json"
-		shot.Headers["Content-Type"] = "application/json"
+		shot.Headers["User-Agent"] = []string{"Dart/3.0 (dart:io)"}
+		shot.Headers["Accept"] = []string{"application/json"}
+		shot.Headers["Content-Type"] = []string{"application/json"}
 
 		shots = append(shots, shot)
 	}
@@ -357,11 +357,11 @@ func TryAjax(s Shot) []Shot {
 	// Axios-like request
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+1)
+		shot.Headers = make(map[string][]string, len(s.Headers)+1)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["Accept"] = "application/json, text/plain, */*"
+		shot.Headers["Accept"] = []string{"application/json, text/plain, */*"}
 
 		shots = append(shots, shot)
 	}
@@ -369,12 +369,12 @@ func TryAjax(s Shot) []Shot {
 	// jQuery AJAX JSON request
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+2)
+		shot.Headers = make(map[string][]string, len(s.Headers)+2)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["X-Requested-With"] = "XMLHttpRequest"
-		shot.Headers["Accept"] = "application/json, text/javascript, */*; q=0.01"
+		shot.Headers["X-Requested-With"] = []string{"XMLHttpRequest"}
+		shot.Headers["Accept"] = []string{"application/json, text/javascript, */*; q=0.01"}
 
 		shots = append(shots, shot)
 	}
@@ -382,12 +382,12 @@ func TryAjax(s Shot) []Shot {
 	// GraphQL-style client
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+2)
+		shot.Headers = make(map[string][]string, len(s.Headers)+2)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["Accept"] = "application/json"
-		shot.Headers["Content-Type"] = "application/json"
+		shot.Headers["Accept"] = []string{"application/json"}
+		shot.Headers["Content-Type"] = []string{"application/json"}
 
 		shots = append(shots, shot)
 	}
@@ -395,13 +395,13 @@ func TryAjax(s Shot) []Shot {
 	// Browser navigation
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+3)
+		shot.Headers = make(map[string][]string, len(s.Headers)+3)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["Sec-Fetch-Mode"] = "navigate"
-		shot.Headers["Sec-Fetch-Dest"] = "document"
-		shot.Headers["Sec-Fetch-User"] = "?1"
+		shot.Headers["Sec-Fetch-Mode"] = []string{"navigate"}
+		shot.Headers["Sec-Fetch-Dest"] = []string{"document"}
+		shot.Headers["Sec-Fetch-User"] = []string{"?1"}
 
 		shots = append(shots, shot)
 	}
@@ -409,12 +409,12 @@ func TryAjax(s Shot) []Shot {
 	// Mobile application
 	{
 		shot := s
-		shot.Headers = make(map[string]string, len(s.Headers)+2)
+		shot.Headers = make(map[string][]string, len(s.Headers)+2)
 		for k, v := range s.Headers {
-			shot.Headers[k] = v
+			shot.Headers[k] = append([]string(nil), v...)
 		}
-		shot.Headers["User-Agent"] = "Dart/3.0 (dart:io)"
-		shot.Headers["Accept"] = "*/*"
+		shot.Headers["User-Agent"] = []string{"Dart/3.0 (dart:io)"}
+		shot.Headers["Accept"] = []string{"*/*"}
 
 		shots = append(shots, shot)
 	}

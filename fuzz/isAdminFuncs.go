@@ -42,11 +42,8 @@ func AdminHeaders(s Shot) []Shot {
 	return vary(values, func(s Shot, v string) Shot {
 		parts := strings.SplitN(v, "=", 2)
 
-		if s.Headers == nil {
-			s.Headers = make(map[string]string)
-		}
-
-		s.Headers[parts[0]] = parts[1]
+		s.Headers = cloneHeaders(s.Headers)
+		s.Headers[parts[0]] = []string{parts[1]}
 
 		return s
 	})(s)
@@ -235,11 +232,8 @@ func AdminHeadersExtreme(s Shot) []Shot {
 	return vary(values, func(s Shot, v string) Shot {
 		parts := strings.SplitN(v, "=", 2)
 
-		if s.Headers == nil {
-			s.Headers = make(map[string]string)
-		}
-
-		s.Headers[parts[0]] = parts[1]
+		s.Headers = cloneHeaders(s.Headers)
+		s.Headers[parts[0]] = []string{parts[1]}
 
 		return s
 	})(s)
